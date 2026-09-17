@@ -98,15 +98,34 @@ function formatDisplayName(id: string): string {
 // Model discovery
 // ---------------------------------------------------------------------------
 
-async function fetchModels(apiKey?: string): Promise<Array<{ id: string; owned_by: string }>> {
+async function fetchModels(
+  apiKey?: string
+): Promise<Array<{
+  id: string;
+  owned_by: string;
+  context_length?: number;
+  max_output_tokens?: number;
+  capabilities?: { vision?: boolean; reasoning?: boolean };
+}>> {
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
   try {
-    const res = await fetch("https://nano-gpt.com/api/v1/models", { headers });
+    // ?detailed=true makes NanoGPT return per-model specs (context_length,
+    // max_output_tokens, capabilities, pricing, ...). Without it the payload
+    // only contains id/object/created/owned_by.
+    const res = await fetch("https://nano-gpt.com/api/v1/models?detailed=true", { headers });
     if (res.ok) {
       const payload = (await res.json()) as {
-        data: Array<{ id: string; object: string; created: number; owned_by: string }>;
+        data: Array<{
+          id: string;
+          object: string;
+          created: number;
+          owned_by: string;
+          context_length?: number;
+          max_output_tokens?: number;
+          capabilities?: { vision?: boolean; reasoning?: boolean };
+        }>;
       };
       const models = payload.data ?? [];
       if (models.length > 0) return models;
@@ -119,22 +138,49 @@ async function fetchModels(apiKey?: string): Promise<Array<{ id: string; owned_b
   return [];
 }
 
+/** True when v is a usable positive number (API values may be 0/undefined). */
+function isPositiveNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
 function buildModelList(
-  remoteModels: Array<{ id: string; owned_by: string }>
+  remoteModels: Array<{
+    id: string;
+    owned_by: string;
+    context_length?: number;
+    max_output_tokens?: number;
+    capabilities?: { vision?: boolean; reasoning?: boolean };
+  }>
 ) {
   return remoteModels
     .filter((m) => !SKIP_PATTERNS.some((p) => p.test(m.id)))
-    .map((m) => ({
-      id: m.id,
-      name: formatDisplayName(m.id),
-      reasoning: isReasoningModel(m.id),
-      input: isVisionModel(m.id)
-        ? (["text", "image"] as const)
-        : (["text"] as const),
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: guessContextWindow(m.id),
-      maxTokens: guessMaxTokens(m.id),
-    }));
+    .map((m) => {
+      const caps = m.capabilities;
+      return {
+        id: m.id,
+        name: formatDisplayName(m.id),
+        // Prefer the API's capability flags. The :thinking ID suffix is kept
+        // as a hard signal (the API misses a few of those), and the name
+        // heuristics only apply when the payload has no capability info.
+        reasoning:
+          caps?.reasoning === true ||
+          /:thinking/.test(m.id) ||
+          (caps?.reasoning === undefined && isReasoningModel(m.id)),
+        input:
+          (caps?.vision === undefined ? isVisionModel(m.id) : caps.vision)
+            ? (["text", "image"] as const)
+            : (["text"] as const),
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        // Prefer the values reported by NanoGPT's API payload; fall back to
+        // the name-based heuristics when they're missing or invalid.
+        contextWindow: isPositiveNumber(m.context_length)
+          ? m.context_length
+          : guessContextWindow(m.id),
+        maxTokens: isPositiveNumber(m.max_output_tokens)
+          ? m.max_output_tokens
+          : guessMaxTokens(m.id),
+      };
+    });
 }
 
 // ---------------------------------------------------------------------------
